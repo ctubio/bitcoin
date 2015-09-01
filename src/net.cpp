@@ -24,6 +24,7 @@
 #include <string.h>
 #else
 #include <fcntl.h>
+#include <poll.h>
 #endif
 
 #ifdef USE_UPNP
@@ -1020,6 +1021,13 @@ static void AcceptConnection(const ListenSocket& hListenSocket) {
     }
 }
 
+bool pollfd_isset(struct pollfd *fds, nfds_t fd_count, int fd, short events) {
+    for (nfds_t i = 0; i < fd_count; i++)
+        if (fds[i].fd == fd)
+            return (fds[i].revents & events) != 0;
+    return false;
+}
+
 void ThreadSocketHandler()
 {
     unsigned int nPrevNodeCount = 0;
@@ -1091,33 +1099,29 @@ void ThreadSocketHandler()
         //
         // Find which sockets have data to receive
         //
-        struct timeval timeout;
-        timeout.tv_sec  = 0;
-        timeout.tv_usec = 50000; // frequency to poll pnode->vSend
+        int timeout = 50; // frequency to poll pnode->vSend
 
-        fd_set fdsetRecv;
-        fd_set fdsetSend;
-        fd_set fdsetError;
-        FD_ZERO(&fdsetRecv);
-        FD_ZERO(&fdsetSend);
-        FD_ZERO(&fdsetError);
-        SOCKET hSocketMax = 0;
+        struct pollfd *fds;
+        nfds_t fd_count = 0;
         bool have_fds = false;
-
-        BOOST_FOREACH(const ListenSocket& hListenSocket, vhListenSocket) {
-            FD_SET(hListenSocket.socket, &fdsetRecv);
-            hSocketMax = max(hSocketMax, hListenSocket.socket);
-            have_fds = true;
-        }
 
         {
             LOCK(cs_vNodes);
+            fds = (pollfd*) calloc(vhListenSocket.size() + vNodes.size(), sizeof(struct pollfd));
+
+            BOOST_FOREACH(const ListenSocket& hListenSocket, vhListenSocket) {
+                fds[fd_count].fd = hListenSocket.socket;
+                fds[fd_count++].events = POLLIN;
+                have_fds = true;
+            }
+
             BOOST_FOREACH(CNode* pnode, vNodes)
             {
                 if (pnode->hSocket == INVALID_SOCKET)
                     continue;
-                FD_SET(pnode->hSocket, &fdsetError);
-                hSocketMax = max(hSocketMax, pnode->hSocket);
+
+                fds[fd_count].fd = pnode->hSocket;
+                fds[fd_count].events = POLLPRI;
                 have_fds = true;
 
                 // Implement the following logic:
@@ -1138,7 +1142,7 @@ void ThreadSocketHandler()
                 {
                     TRY_LOCK(pnode->cs_vSend, lockSend);
                     if (lockSend && !pnode->vSendMsg.empty()) {
-                        FD_SET(pnode->hSocket, &fdsetSend);
+                        fds[fd_count++].events |= POLLOUT;
                         continue;
                     }
                 }
@@ -1147,13 +1151,13 @@ void ThreadSocketHandler()
                     if (lockRecv && (
                         pnode->vRecvMsg.empty() || !pnode->vRecvMsg.front().complete() ||
                         pnode->GetTotalRecvSize() <= ReceiveFloodSize()))
-                        FD_SET(pnode->hSocket, &fdsetRecv);
+                        fds[fd_count].events |= POLLIN;
                 }
+                fd_count++;
             }
         }
 
-        int nSelect = select(have_fds ? hSocketMax + 1 : 0,
-                             &fdsetRecv, &fdsetSend, &fdsetError, &timeout);
+        int nSelect = poll(fds, fd_count, timeout);
         boost::this_thread::interruption_point();
 
         if (nSelect == SOCKET_ERROR)
@@ -1162,12 +1166,9 @@ void ThreadSocketHandler()
             {
                 int nErr = WSAGetLastError();
                 LogPrintf("socket select error %s\n", NetworkErrorString(nErr));
-                for (unsigned int i = 0; i <= hSocketMax; i++)
-                    FD_SET(i, &fdsetRecv);
+                assert(false);
             }
-            FD_ZERO(&fdsetSend);
-            FD_ZERO(&fdsetError);
-            MilliSleep(timeout.tv_usec/1000);
+            MilliSleep(timeout);
         }
 
         //
@@ -1175,7 +1176,7 @@ void ThreadSocketHandler()
         //
         BOOST_FOREACH(const ListenSocket& hListenSocket, vhListenSocket)
         {
-            if (hListenSocket.socket != INVALID_SOCKET && FD_ISSET(hListenSocket.socket, &fdsetRecv))
+            if (hListenSocket.socket != INVALID_SOCKET && pollfd_isset(fds, fd_count, hListenSocket.socket, POLLIN))
             {
                 AcceptConnection(hListenSocket);
             }
@@ -1200,7 +1201,7 @@ void ThreadSocketHandler()
             //
             if (pnode->hSocket == INVALID_SOCKET)
                 continue;
-            if (FD_ISSET(pnode->hSocket, &fdsetRecv) || FD_ISSET(pnode->hSocket, &fdsetError))
+            if (pollfd_isset(fds, fd_count, pnode->hSocket, POLLIN | POLLPRI | POLLHUP | POLLERR))
             {
                 TRY_LOCK(pnode->cs_vRecvMsg, lockRecv);
                 if (lockRecv)
@@ -1244,7 +1245,7 @@ void ThreadSocketHandler()
             //
             if (pnode->hSocket == INVALID_SOCKET)
                 continue;
-            if (FD_ISSET(pnode->hSocket, &fdsetSend))
+            if (pollfd_isset(fds, fd_count, pnode->hSocket, POLLOUT))
             {
                 TRY_LOCK(pnode->cs_vSend, lockSend);
                 if (lockSend)
@@ -1284,6 +1285,7 @@ void ThreadSocketHandler()
             BOOST_FOREACH(CNode* pnode, vNodesCopy)
                 pnode->Release();
         }
+        free(fds);
     }
 }
 

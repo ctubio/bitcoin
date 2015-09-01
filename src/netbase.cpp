@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #endif
 #include <fcntl.h>
+#include <poll.h>
 #endif
 
 #include <boost/algorithm/string/case_conv.hpp> // for to_lower()
@@ -266,11 +267,10 @@ bool static InterruptibleRecv(char* data, size_t len, int timeout, SOCKET& hSock
                 if (!IsSelectableSocket(hSocket)) {
                     return false;
                 }
-                struct timeval tval = MillisToTimeval(std::min(endTime - curTime, maxWait));
-                fd_set fdset;
-                FD_ZERO(&fdset);
-                FD_SET(hSocket, &fdset);
-                int nRet = select(hSocket + 1, &fdset, NULL, NULL, &tval);
+                struct pollfd fd;
+                fd.fd = hSocket;
+                fd.events = POLLIN;
+                int nRet = poll(&fd, 1, std::min(endTime - curTime, maxWait));
                 if (nRet == SOCKET_ERROR) {
                     return false;
                 }
