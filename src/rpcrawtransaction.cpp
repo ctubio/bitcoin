@@ -819,11 +819,13 @@ UniValue sendrawtransaction(const UniValue& params, bool fHelp)
     const CCoins* existingCoins = view.AccessCoins(hashTx);
     bool fHaveMempool = mempool.exists(hashTx);
     bool fHaveChain = existingCoins && existingCoins->nHeight < 1000000000;
+    uint256 newhash = hashTx;
     if (!fHaveMempool && !fHaveChain) {
         // push to local node and sync with wallets
         CValidationState state;
         bool fMissingInputs;
-        if (!AcceptToMemoryPool(mempool, state, tx, false, &fMissingInputs, false, !fOverrideFees)) {
+        newhash = AcceptToMemoryPool(mempool, state, tx, false, &fMissingInputs, false, !fOverrideFees);
+        if (newhash.IsNull()) {
             if (state.IsInvalid()) {
                 throw JSONRPCError(RPC_TRANSACTION_REJECTED, strprintf("%i: %s", state.GetRejectCode(), state.GetRejectReason()));
             } else {
@@ -836,7 +838,13 @@ UniValue sendrawtransaction(const UniValue& params, bool fHelp)
     } else if (fHaveChain) {
         throw JSONRPCError(RPC_TRANSACTION_ALREADY_IN_CHAIN, "transaction already in block chain");
     }
-    RelayTransaction(tx);
+    if (newhash == tx.GetHash())
+        RelayTransaction(tx);
+    else {
+        CTransaction newtx;
+        if (mempool.lookup(newhash, newtx))
+            RelayTransaction(newtx);
+    }
 
-    return hashTx.GetHex();
+    return newhash.GetHex();
 }
