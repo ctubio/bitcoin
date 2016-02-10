@@ -105,9 +105,9 @@ public:
 
 class TransactionSignatureChecker : public BaseSignatureChecker
 {
-private:
+protected:
     const CTransaction* txTo;
-    unsigned int nIn;
+    const unsigned int nIn;
 
 protected:
     virtual bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
@@ -125,6 +125,18 @@ private:
 
 public:
     MutableTransactionSignatureChecker(const CMutableTransaction* txToIn, unsigned int nInIn) : TransactionSignatureChecker(&txTo, nInIn), txTo(*txToIn) {}
+};
+
+class LowSMutableTransactionSignatureChecker : public TransactionSignatureChecker
+{
+private:
+    const CTransaction nonMutableTxTo;
+public:
+    CMutableTransaction txTo;
+
+public:
+    LowSMutableTransactionSignatureChecker(CMutableTransaction* txToIn, unsigned int nInIn) : TransactionSignatureChecker(&nonMutableTxTo, nInIn), nonMutableTxTo(*txToIn), txTo(*txToIn) {}
+    bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
 };
 
 bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, unsigned int flags, const BaseSignatureChecker& checker, ScriptError* error = NULL);

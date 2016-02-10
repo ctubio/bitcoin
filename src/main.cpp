@@ -1173,9 +1173,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
             }
         }
 
+        CMutableTransaction mtx(tx);
+
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
-        if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true))
+        if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, NULL, &mtx))
             return false;
 
         // Check again against just the consensus-critical mandatory script
@@ -1204,13 +1206,18 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
         }
         pool.RemoveStaged(allConflicting);
 
-        // Store transaction in memory
-        pool.addUnchecked(hash, entry, setAncestors, !IsInitialBlockDownload());
+        if (mtx.GetHash() != tx.GetHash()) {
+            CTransaction tx(mtx);
+            CTxMemPoolEntry entry(tx, nFees, GetTime(), dPriority, chainActive.Height(), pool.HasNoInputsOf(tx), inChainInputValue, fSpendsCoinbase, nSigOps);
+            pool.addUnchecked(tx.GetHash(), entry, setAncestors, !IsInitialBlockDownload());
+        } else
+            // Store transaction in memory
+            pool.addUnchecked(hash, entry, setAncestors, !IsInitialBlockDownload());
 
         // trim mempool and check if tx was trimmed
         if (!fOverrideMempoolLimit) {
             LimitMempoolSize(pool, GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000, GetArg("-mempoolexpiry", DEFAULT_MEMPOOL_EXPIRY) * 60 * 60);
-            if (!pool.exists(hash))
+            if (!pool.exists(hash) && !pool.exists(mtx.GetHash()))
                 return state.DoS(0, false, REJECT_INSUFFICIENTFEE, "mempool full");
         }
     }
@@ -1625,7 +1632,7 @@ bool CheckTxInputs(const CTransaction& tx, CValidationState& state, const CCoins
 }
 }// namespace Consensus
 
-bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsViewCache &inputs, bool fScriptChecks, unsigned int flags, bool cacheStore, std::vector<CScriptCheck> *pvChecks)
+bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsViewCache &inputs, bool fScriptChecks, unsigned int flags, bool cacheStore, std::vector<CScriptCheck> *pvChecks, CMutableTransaction *mtx)
 {
     if (!tx.IsCoinBase())
     {
@@ -1649,7 +1656,7 @@ bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsVi
                 assert(coins);
 
                 // Verify signature
-                CScriptCheck check(*coins, tx, i, flags, cacheStore);
+                CScriptCheck check(*coins, tx, i, flags & ~SCRIPT_VERIFY_LOW_S, cacheStore);
                 if (pvChecks) {
                     pvChecks->push_back(CScriptCheck());
                     check.swap(pvChecks->back());
@@ -1674,8 +1681,24 @@ bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsVi
                     // peering with non-upgraded nodes even after a soft-fork
                     // super-majority vote has passed.
                     return state.DoS(100,false, REJECT_INVALID, strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(check.GetScriptError())));
+                } else if (mtx) {
+                    const CScript &scriptSig = mtx->vin[i].scriptSig;
+                    const CScript &scriptPubKey = coins->vout[tx.vin[i].prevout.n].scriptPubKey;
+                    LowSMutableTransactionSignatureChecker checker(mtx, i);
+                    if (VerifyScript(scriptSig, scriptPubKey, flags & ~SCRIPT_VERIFY_LOW_S, checker, NULL)) {
+                        const CScript &scriptSig = checker.txTo.vin[i].scriptSig;
+                        if (VerifyScript(scriptSig, scriptPubKey, flags, MutableTransactionSignatureChecker(&checker.txTo, i), NULL))
+                            mtx->vin[i].scriptSig = scriptSig;
+                        else {
+                            error("Failed to mutate transaction to make it standard\n");
+                            return state.Invalid(false, REJECT_NONSTANDARD, strprintf("low-s-mutation-failed (%s)", ScriptErrorString(SCRIPT_ERR_SIG_HIGH_S)));
+                        }
+                    } else
+                        error("BUG: Mutable Tx Sig checker failed to VerifyScript\n");
                 }
             }
+            if (mtx && mtx->GetHash() != tx.GetHash())
+                LogPrintf("Mutated transaction added to mempool! (%s -> %s)\n", tx.GetHash().ToString().c_str(), mtx->GetHash().ToString().c_str());
         }
     }
 

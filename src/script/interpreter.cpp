@@ -5,6 +5,10 @@
 
 #include "interpreter.h"
 
+#ifndef BUILD_BITCOIN_INTERNAL
+#include <secp256k1.h>
+#endif
+
 #include "primitives/transaction.h"
 #include "crypto/ripemd160.h"
 #include "crypto/sha1.h"
@@ -1094,6 +1098,53 @@ uint256 SignatureHash(const CScript& scriptCode, const CTransaction& txTo, unsig
 bool TransactionSignatureChecker::VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& pubkey, const uint256& sighash) const
 {
     return pubkey.Verify(sighash, vchSig);
+}
+
+#ifndef BUILD_BITCOIN_INTERNAL
+secp256k1_context_t *secp256k1_ctx;
+class SECP_CTX {
+public:
+    SECP_CTX() { secp256k1_ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY); }
+    ~SECP_CTX() { secp256k1_context_destroy(secp256k1_ctx); secp256k1_ctx = NULL; }
+};
+static SECP_CTX ctx;
+#endif
+
+bool LowSMutableTransactionSignatureChecker::VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& pubkey, const uint256& sighash) const
+{
+    if (!TransactionSignatureChecker::VerifySignature(vchSig, pubkey, sighash))
+        return false;
+#ifndef BUILD_BITCOIN_INTERNAL
+    std::vector<unsigned char> mutableSig(vchSig);
+    mutableSig.resize(std::max(mutableSig.size(), size_t(80)));
+    int siglen = mutableSig.size();
+    int tweaked = secp256k1_ecdsa_verify_lows(secp256k1_ctx, sighash.begin(), &mutableSig[0], &siglen, pubkey.begin(), pubkey.size());
+    if (tweaked < 0)
+        return false;
+    else if (tweaked == 2) {
+        mutableSig.resize(siglen);
+        CScript newScriptSig;
+        const CScript& scriptSig = txTo.vin[nIn].scriptSig;
+
+        CScript::const_iterator pc = scriptSig.begin();
+        CScript::const_iterator last_pc = scriptSig.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> vchData;
+        while (scriptSig.GetOp(pc, opcode, vchData))
+        {
+            if (vchData.size() == vchSig.size() + 1 && !memcmp(&vchData[0], &vchSig[0], vchData.size())) {
+                std::vector<unsigned char> newSig(mutableSig);
+                newSig.push_back(vchData[vchSig.size()]);
+                newScriptSig << newSig;
+            } else
+                newScriptSig.insert(newScriptSig.end(), last_pc, pc);
+            last_pc = pc;
+        }
+
+        const_cast<CScript&> (txTo.vin[nIn].scriptSig) = newScriptSig;
+    }
+#endif
+    return true;
 }
 
 bool TransactionSignatureChecker::CheckSig(const vector<unsigned char>& vchSigIn, const vector<unsigned char>& vchPubKey, const CScript& scriptCode) const
