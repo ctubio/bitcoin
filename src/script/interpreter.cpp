@@ -1101,7 +1101,7 @@ bool TransactionSignatureChecker::VerifySignature(const std::vector<unsigned cha
 }
 
 #ifndef BUILD_BITCOIN_INTERNAL
-secp256k1_context_t *secp256k1_ctx;
+secp256k1_context *secp256k1_ctx;
 class SECP_CTX {
 public:
     SECP_CTX() { secp256k1_ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY); }
@@ -1115,14 +1115,16 @@ bool LowSMutableTransactionSignatureChecker::VerifySignature(const std::vector<u
     if (!TransactionSignatureChecker::VerifySignature(vchSig, pubkey, sighash))
         return false;
 #ifndef BUILD_BITCOIN_INTERNAL
-    std::vector<unsigned char> mutableSig(vchSig);
-    mutableSig.resize(std::max(mutableSig.size(), size_t(80)));
-    int siglen = mutableSig.size();
-    int tweaked = secp256k1_ecdsa_verify_lows(secp256k1_ctx, sighash.begin(), &mutableSig[0], &siglen, pubkey.begin(), pubkey.size());
-    if (tweaked < 0)
-        return false;
-    else if (tweaked == 2) {
-        mutableSig.resize(siglen);
+    secp256k1_ecdsa_signature sig;
+    assert(secp256k1_ecdsa_signature_parse_der(secp256k1_ctx, &sig, &vchSig[0], vchSig.size()) == 1);
+
+    secp256k1_ecdsa_signature new_sig;
+    if (secp256k1_ecdsa_signature_normalize(secp256k1_ctx, &new_sig, &sig) == 1) {
+        std::vector<unsigned char> mutableSig(80);
+        size_t mutableSigLen = 80;
+        assert(secp256k1_ecdsa_signature_serialize_der(secp256k1_ctx, &mutableSig[0], &mutableSigLen, &new_sig) == 1);
+        mutableSig.resize(mutableSigLen);
+
         CScript newScriptSig;
         const CScript& scriptSig = txTo.vin[nIn].scriptSig;
 
